@@ -51,9 +51,9 @@ const ClientError = require('./exceptions/ClientError');
 
 const init = async () => {
   const cacheService = new CacheService();
-  const collaborationsService = new CollaborationsService();
+  const collaborationsService = new CollaborationsService(cacheService);
   const playlistSongActivitiesService = new PlaylistSongActivitiesService();
-  const playlistsService = new PlaylistsService(collaborationsService, playlistSongActivitiesService);
+  const playlistsService = new PlaylistsService(collaborationsService, playlistSongActivitiesService, cacheService);
   const musicService = new MusicService(cacheService);
   const usersService = new UsersService();
   const authenticationsService = new AuthenticationsService();

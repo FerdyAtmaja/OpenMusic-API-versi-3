@@ -5,10 +5,11 @@ const NotFoundError = require('../../exceptions/NotFoundError');
 const AuthorizationError = require('../../exceptions/AuthorizationError');
 
 class PlaylistsService {
-  constructor(collaborationService, activitiesService) {
+  constructor(collaborationService, activitiesService, cacheService) {
     this._pool = new Pool();
     this._collaborationService = collaborationService;
     this._activitiesService = activitiesService;
+    this._cacheService = cacheService;
   }
 
   async addPlaylist({ name, owner }) {
@@ -25,21 +26,49 @@ class PlaylistsService {
       throw new InvariantError('Playlist gagal ditambahkan');
     }
 
+    // Invalidate playlists cache
+    if (this._cacheService) {
+      await this._cacheService.delete(`playlists:${owner}`);
+    }
+    
     return result.rows[0].id;
   }
 
   async getPlaylists(owner) {
-    const query = {
-      text: `SELECT p.id, p.name, u.username FROM playlists p 
-             LEFT JOIN users u ON u.id = p.owner 
-             LEFT JOIN collaborations c ON c."playlistId" = p.id 
-             WHERE p.owner = $1 OR c."userId" = $1
-             GROUP BY p.id, p.name, u.username`,
-      values: [owner],
-    };
+    if (!this._cacheService) {
+      const query = {
+        text: `SELECT p.id, p.name, u.username FROM playlists p 
+               LEFT JOIN users u ON u.id = p.owner 
+               LEFT JOIN collaborations c ON c."playlistId" = p.id 
+               WHERE p.owner = $1 OR c."userId" = $1
+               GROUP BY p.id, p.name, u.username`,
+        values: [owner],
+      };
+      const result = await this._pool.query(query);
+      return result.rows;
+    }
 
-    const result = await this._pool.query(query);
-    return result.rows;
+    const cacheKey = `playlists:${owner}`;
+    
+    try {
+      const result = await this._cacheService.get(cacheKey);
+      return JSON.parse(result);
+    } catch (error) {
+      const query = {
+        text: `SELECT p.id, p.name, u.username FROM playlists p 
+               LEFT JOIN users u ON u.id = p.owner 
+               LEFT JOIN collaborations c ON c."playlistId" = p.id 
+               WHERE p.owner = $1 OR c."userId" = $1
+               GROUP BY p.id, p.name, u.username`,
+        values: [owner],
+      };
+
+      const result = await this._pool.query(query);
+      const playlists = result.rows;
+      
+      await this._cacheService.set(cacheKey, JSON.stringify(playlists));
+      return playlists;
+    }
   }
 
   async deletePlaylistById(id) {
@@ -69,38 +98,82 @@ class PlaylistsService {
       throw new InvariantError('Lagu gagal ditambahkan ke playlist');
     }
 
+    // Invalidate playlist songs cache
+    if (this._cacheService) {
+      await this._cacheService.delete(`playlist:${playlistId}:songs`);
+    }
+
     if (this._activitiesService) {
       await this._activitiesService.addActivity(playlistId, songId, userId, 'add');
     }
   }
 
   async getSongsFromPlaylist(playlistId) {
-    const playlistQuery = {
-      text: `SELECT p.id, p.name, u.username FROM playlists p 
-             LEFT JOIN users u ON u.id = p.owner 
-             WHERE p.id = $1`,
-      values: [playlistId],
-    };
+    if (!this._cacheService) {
+      const playlistQuery = {
+        text: `SELECT p.id, p.name, u.username FROM playlists p 
+               LEFT JOIN users u ON u.id = p.owner 
+               WHERE p.id = $1`,
+        values: [playlistId],
+      };
 
-    const playlistResult = await this._pool.query(playlistQuery);
+      const playlistResult = await this._pool.query(playlistQuery);
 
-    if (!playlistResult.rows.length) {
-      throw new NotFoundError('Playlist tidak ditemukan');
+      if (!playlistResult.rows.length) {
+        throw new NotFoundError('Playlist tidak ditemukan');
+      }
+
+      const songsQuery = {
+        text: `SELECT s.id, s.title, s.performer FROM songs s 
+               LEFT JOIN playlist_songs ps ON ps."songId" = s.id 
+               WHERE ps."playlistId" = $1`,
+        values: [playlistId],
+      };
+
+      const songsResult = await this._pool.query(songsQuery);
+
+      return {
+        ...playlistResult.rows[0],
+        songs: songsResult.rows,
+      };
     }
 
-    const songsQuery = {
-      text: `SELECT s.id, s.title, s.performer FROM songs s 
-             LEFT JOIN playlist_songs ps ON ps."songId" = s.id 
-             WHERE ps."playlistId" = $1`,
-      values: [playlistId],
-    };
+    const cacheKey = `playlist:${playlistId}:songs`;
+    
+    try {
+      const result = await this._cacheService.get(cacheKey);
+      return JSON.parse(result);
+    } catch (error) {
+      const playlistQuery = {
+        text: `SELECT p.id, p.name, u.username FROM playlists p 
+               LEFT JOIN users u ON u.id = p.owner 
+               WHERE p.id = $1`,
+        values: [playlistId],
+      };
 
-    const songsResult = await this._pool.query(songsQuery);
+      const playlistResult = await this._pool.query(playlistQuery);
 
-    return {
-      ...playlistResult.rows[0],
-      songs: songsResult.rows,
-    };
+      if (!playlistResult.rows.length) {
+        throw new NotFoundError('Playlist tidak ditemukan');
+      }
+
+      const songsQuery = {
+        text: `SELECT s.id, s.title, s.performer FROM songs s 
+               LEFT JOIN playlist_songs ps ON ps."songId" = s.id 
+               WHERE ps."playlistId" = $1`,
+        values: [playlistId],
+      };
+
+      const songsResult = await this._pool.query(songsQuery);
+
+      const playlistWithSongs = {
+        ...playlistResult.rows[0],
+        songs: songsResult.rows,
+      };
+      
+      await this._cacheService.set(cacheKey, JSON.stringify(playlistWithSongs));
+      return playlistWithSongs;
+    }
   }
 
   async deleteSongFromPlaylist(playlistId, songId, userId) {
@@ -113,6 +186,11 @@ class PlaylistsService {
 
     if (!result.rows.length) {
       throw new InvariantError('Lagu gagal dihapus dari playlist');
+    }
+
+    // Invalidate playlist songs cache
+    if (this._cacheService) {
+      await this._cacheService.delete(`playlist:${playlistId}:songs`);
     }
 
     if (this._activitiesService) {

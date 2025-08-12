@@ -2,7 +2,7 @@ const { Pool } = require('pg');
 const { nanoid } = require('nanoid');
 const InvariantError = require('../../exceptions/InvariantError');
 const NotFoundError = require('../../exceptions/NotFoundError');
-const { mapDBToModel } = require('../../utils');
+const { mapAlbumToModel, mapSongToModel } = require('../../utils');
 
 class MusicService {
   constructor(cacheService) {
@@ -39,7 +39,7 @@ class MusicService {
       throw new NotFoundError('Album tidak ditemukan');
     }
 
-    const album = mapDBToModel(result.rows[0]);
+    const album = mapAlbumToModel(result.rows[0]);
 
     // Get songs for this album
     const songsQuery = {
@@ -47,7 +47,7 @@ class MusicService {
       values: [id],
     };
     const songsResult = await this._pool.query(songsQuery);
-    const songs = songsResult.rows.map(mapDBToModel);
+    const songs = songsResult.rows.map(mapSongToModel);
 
     // Add coverUrl if cover exists
     const coverUrl = album.cover ? `http://${process.env.HOST}:${process.env.PORT}/upload/images/${album.cover}` : null;
@@ -107,30 +107,44 @@ class MusicService {
     if (albumId) {
       await this._cacheService.delete(`album:${albumId}`);
     }
+    
+    // Invalidate songs cache
+    await this._cacheService.delete('songs:all:all');
+    
     return result.rows[0].id;
   }
 
   async getSongs(title, performer) {
-    let query = 'SELECT id, title, performer FROM songs';
-    const values = [];
-    const conditions = [];
+    const cacheKey = `songs:${title || 'all'}:${performer || 'all'}`;
+    
+    try {
+      const result = await this._cacheService.get(cacheKey);
+      return JSON.parse(result);
+    } catch (error) {
+      let query = 'SELECT id, title, performer FROM songs';
+      const values = [];
+      const conditions = [];
 
-    if (title) {
-      conditions.push(`title ILIKE $${conditions.length + 1}`);
-      values.push(`%${title}%`);
+      if (title) {
+        conditions.push(`title ILIKE $${conditions.length + 1}`);
+        values.push(`%${title}%`);
+      }
+
+      if (performer) {
+        conditions.push(`performer ILIKE $${conditions.length + 1}`);
+        values.push(`%${performer}%`);
+      }
+
+      if (conditions.length > 0) {
+        query += ` WHERE ${conditions.join(' AND ')}`;
+      }
+
+      const result = await this._pool.query(query, values);
+      const songs = result.rows.map(mapSongToModel);
+      
+      await this._cacheService.set(cacheKey, JSON.stringify(songs));
+      return songs;
     }
-
-    if (performer) {
-      conditions.push(`performer ILIKE $${conditions.length + 1}`);
-      values.push(`%${performer}%`);
-    }
-
-    if (conditions.length > 0) {
-      query += ` WHERE ${conditions.join(' AND ')}`;
-    }
-
-    const result = await this._pool.query(query, values);
-    return result.rows.map(mapDBToModel);
   }
 
   async getSongById(id) {
@@ -144,7 +158,7 @@ class MusicService {
       throw new NotFoundError('Lagu tidak ditemukan');
     }
 
-    return mapDBToModel(result.rows[0]);
+    return mapSongToModel(result.rows[0]);
   }
 
   async editSongById(id, { title, year, genre, performer, duration, albumId }) {
@@ -174,6 +188,9 @@ class MusicService {
     if (albumId && albumId !== oldAlbumId) {
       await this._cacheService.delete(`album:${albumId}`);
     }
+    
+    // Invalidate songs cache
+    await this._cacheService.delete('songs:all:all');
   }
 
   async deleteSongById(id) {
@@ -199,6 +216,9 @@ class MusicService {
     if (albumId) {
       await this._cacheService.delete(`album:${albumId}`);
     }
+    
+    // Invalidate songs cache
+    await this._cacheService.delete('songs:all:all');
   }
 
   async addAlbumCover(albumId, coverFilename) {
